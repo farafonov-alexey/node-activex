@@ -53,8 +53,5 @@
     "node": ">= 4.0.0"
   },
   "license": "BSD",
-  "main": "./lib/activex",
-  "os": [
-    "win32"
-  ]
+  "main": "./lib/activex"
 }
