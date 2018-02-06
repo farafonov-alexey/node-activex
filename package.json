@@ -23,7 +23,8 @@
   },
   "binary": {
     "module_name": "node_activex",
-    "module_path": "./build/Release/"
+    "module_path": "./build/Release/",
+    "host": "https://your_module.s3-us-west-1.amazonaws.com"
   },
   "contributors": [
     "durs <yuri.dursin@gmail.com>"
