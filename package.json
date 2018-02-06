@@ -21,6 +21,10 @@
     "url": "https://github.com/durs",
     "email": "yuri.dursin@gmail.com"
   },
+  "binary": {
+    "module_name": "node_activex",
+    "module_path": "./build/Release/"
+  },
   "contributors": [
     "durs <yuri.dursin@gmail.com>"
   ],
@@ -29,13 +33,24 @@
     "url": "git://github.com/durs/node-activex.git"
   },
   "dependencies": {
+    "nan": "~2.8.0",
+    "node-pre-gyp": "~0.6.38"
   },
-  "devDependencies": {},
-  "engines": {
-    "node": ">= 4.0.0"
+  "bundledDependencies": [
+    "node-pre-gyp"
+  ],
+  "devDependencies": {
+    "aws-sdk": "2.x",
+    "eslint": "3.5.0",
+    "mocha": "3.x"
   },
   "scripts": {
+    "prepublishOnly": "npm ls",
+    "install": "node-pre-gyp install --fallback-to-build",
     "test": "mocha test"
+  },
+  "engines": {
+    "node": ">= 4.0.0"
   },
   "license": "BSD",
   "main": "./lib/activex",
