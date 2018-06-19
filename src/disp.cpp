@@ -111,7 +111,6 @@ bool DispObject::get(LPOLESTR tag, LONG index, const PropertyCallbackInfo<Value>
 		if (index >= 0) vargs.items.push_back(CComVariant(index));
 		LONG argcnt = (LONG)vargs.items.size();
 		VARIANT *pargs = (argcnt > 0) ? &vargs.items.front() : 0;
-		//hrcode = disp->GetProperty(propid, index, &value);
 		hrcode = disp->GetProperty(propid, argcnt, pargs, &value);
 		if (FAILED(hrcode) && dispid != DISPID_VALUE){
 			isolate->ThrowException(DispError(isolate, hrcode, L"DispPropertyGet", tag));
@@ -229,19 +228,23 @@ HRESULT DispObject::valueOf(Isolate *isolate, VARIANT &value) {
 	if (!is_prepared()) prepare();
 	HRESULT hrcode;
 	if (!disp) hrcode = E_UNEXPECTED;
-	else {
-		if ((options & option_function_simple) != 0) {
-			hrcode = disp->ExecuteMethod(dispid, 0, 0, &value);
-		}
-		else {
-			hrcode = disp->GetProperty(dispid, index, &value);
-		}
-		if (FAILED(hrcode) && is_object()) {
-			value.vt = VT_DISPATCH;
-			value.pdispVal = disp ? (IDispatch*)disp->ptr : NULL;
-			if (value.pdispVal) value.pdispVal->AddRef();
-			hrcode = S_OK;
-		}
+
+	// simple function without arguments
+	else if ((options & option_function_simple) != 0) {
+		hrcode = disp->ExecuteMethod(dispid, 0, 0, &value);
+	}
+
+	// property or array element
+	else if (dispid != DISPID_VALUE || index >= 0) {
+		hrcode = disp->GetProperty(dispid, index, &value);
+	}
+
+	// self dispatch object
+	else /*if (is_object())*/ {
+		value.vt = VT_DISPATCH;
+		value.pdispVal = (IDispatch*)disp->ptr;
+		if (value.pdispVal) value.pdispVal->AddRef();
+		hrcode = S_OK;
 	}
 	return hrcode;
 }
@@ -252,14 +255,24 @@ HRESULT DispObject::valueOf(Isolate *isolate, const Local<Object> &self, Local<V
 	if (!disp) hrcode = E_UNEXPECTED;
 	else {
 		CComVariant val;
+
+		// simple function without arguments
 		if ((options & option_function_simple) != 0) {
 			hrcode = disp->ExecuteMethod(dispid, 0, 0, &val);
 		}
+
+		// self value, property or array element
 		else {
 			hrcode = disp->GetProperty(dispid, index, &val);
 		}
-		if SUCCEEDED(hrcode) value = Variant2Value(isolate, val);
-		else if (is_object()) {
+
+		// convert result to v8 value
+		if SUCCEEDED(hrcode) {
+			value = Variant2Value(isolate, val);
+		}
+
+		// or return self as object
+		else  {
 			value = self;
 			hrcode = S_OK;
 		}
@@ -599,36 +612,95 @@ const static std::map<std::wstring, VARTYPE> str2vt = {
 	{ L"uint32", VT_UI4 },
 	{ L"int64", VT_I8 },
 	{ L"uint64", VT_UI8 },
+	{ L"currency", VT_CY },
 
 	{ L"float", VT_R4 },
 	{ L"double", VT_R8 },
-	{ L"empty", VT_EMPTY },
-	{ L"string", VT_BSTR },
 	{ L"date", VT_DATE },
+	{ L"decimal", VT_DECIMAL },
+
+	{ L"string", VT_BSTR },
+	{ L"empty", VT_EMPTY },
 	{ L"variant", VT_VARIANT },
-	{ L"null", VT_NULL }
+	{ L"null", VT_NULL },
+	{ L"byref", VT_BYREF }
 };
 
-VariantObject::VariantObject(const FunctionCallbackInfo<Value> &args) {
-	Isolate *isolate = args.GetIsolate();
-	Local<Value> val;
+static std::map<VARTYPE, std::wstring> vt2str_prepare() {
+	std::map<VARTYPE, std::wstring> map;
+	for (auto &p : str2vt) map.emplace(p.second, p.first);
+	return std::move(map);
+}
+
+const static std::map<VARTYPE, std::wstring> vt2str = vt2str_prepare();
+
+bool VariantObject::assign(Isolate *isolate, Local<Value> &val, Local<Value> &type) {
 	VARTYPE vt = VT_EMPTY;
-	int argcnt = args.Length();
-	if (argcnt > 0) val = args[0];
-	if (argcnt > 0) {
-		if (args[1]->IsString()) {
-			Local<String> vtval = args[1]->ToString();
+	if (!type.IsEmpty()) {
+		if (type->IsString()) {
+			Local<String> vtval = type->ToString();
 			String::Value vtstr(vtval);
+			const wchar_t *pvtstr = (const wchar_t *)*vtstr;
 			int vtstr_len = vtstr.length();
+			if (vtstr_len > 0 && *pvtstr == 'p') {
+				vt |= VT_BYREF;
+				vtstr_len--;
+				pvtstr++;
+			}
 			if (vtstr_len > 0) {
-				type.assign((const wchar_t*)*vtstr, vtstr_len);
+				std::wstring type(pvtstr, vtstr_len);
 				auto it = str2vt.find(type);
-				if (it != str2vt.end()) vt = it->second;
-				else type.clear();
+				if (it != str2vt.end()) vt |= it->second;
+			}
+		}
+		else if (type->IsInt32()) {
+			vt |= type->Int32Value();
+		}
+	}
+
+	if (val.IsEmpty()) {
+		if FAILED(value.ChangeType(vt)) return false;
+		if ((value.vt & VT_BYREF) == 0) pvalue.Clear();
+		return true;
+	}
+
+	value.Clear();
+	pvalue.Clear();
+	if ((vt & VT_BYREF) == 0) {
+		Value2Variant(isolate, val, value, vt);
+	}
+	else {
+		VARIANT *refvalue = nullptr;
+		VARTYPE vt_noref = vt & ~VT_BYREF;
+		VariantObject *ref = (!val.IsEmpty() && val->IsObject()) ? GetInstanceOf(isolate, val->ToObject()) : nullptr;
+		if (ref) {
+			if ((ref->value.vt & VT_BYREF) != 0) value = ref->value;
+			else refvalue = &ref->value;
+		}
+		else {
+			Value2Variant(isolate, val, pvalue, vt_noref);
+			refvalue = &pvalue;
+		}
+		if (refvalue) {
+			if (vt_noref == 0 || vt_noref == VT_VARIANT || refvalue->vt == VT_EMPTY) {
+				value.vt = VT_VARIANT | VT_BYREF;
+				value.pvarVal = refvalue;
+			}
+			else {
+				value.vt = refvalue->vt | VT_BYREF;
+				value.byref = &refvalue->intVal;
 			}
 		}
 	}
-	Value2Variant(isolate, val, value, vt);
+	return true;
+}
+
+VariantObject::VariantObject(const FunctionCallbackInfo<Value> &args) {
+	Local<Value> val, type;
+	int argcnt = args.Length();
+	if (argcnt > 0) val = args[0];
+	if (argcnt > 1) type = args[1];
+	assign(args.GetIsolate(), val, type);
 }
 
 void VariantObject::NodeInit(const Local<Object> &target) {
@@ -638,6 +710,9 @@ void VariantObject::NodeInit(const Local<Object> &target) {
 	Local<FunctionTemplate> clazz = FunctionTemplate::New(isolate, NodeCreate);
 	clazz->SetClassName(String::NewFromUtf8(isolate, "Variant"));
 
+	NODE_SET_PROTOTYPE_METHOD(clazz, "clear", NodeClear);
+	NODE_SET_PROTOTYPE_METHOD(clazz, "assign", NodeAssign);
+	NODE_SET_PROTOTYPE_METHOD(clazz, "cast", NodeCast);
 	NODE_SET_PROTOTYPE_METHOD(clazz, "toString", NodeToString);
 	NODE_SET_PROTOTYPE_METHOD(clazz, "valueOf", NodeValueOf);
 
@@ -673,6 +748,44 @@ void VariantObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
 	args.GetReturnValue().Set(self);
 }
 
+void VariantObject::NodeClear(const FunctionCallbackInfo<Value>& args) {
+	Isolate *isolate = args.GetIsolate();
+	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
+	if (!self) {
+		isolate->ThrowException(DispErrorInvalid(isolate));
+		return;
+	}
+	self->value.Clear();
+	self->pvalue.Clear();
+}
+
+void VariantObject::NodeAssign(const FunctionCallbackInfo<Value>& args) {
+	Isolate *isolate = args.GetIsolate();
+	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
+	if (!self) {
+		isolate->ThrowException(DispErrorInvalid(isolate));
+		return;
+	}
+	Local<Value> val, type;
+	int argcnt = args.Length();
+	if (argcnt > 0) val = args[0];
+	if (argcnt > 1) type = args[1];
+	self->assign(isolate, val, type);
+}
+
+void VariantObject::NodeCast(const FunctionCallbackInfo<Value>& args) {
+	Isolate *isolate = args.GetIsolate();
+	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
+	if (!self) {
+		isolate->ThrowException(DispErrorInvalid(isolate));
+		return;
+	}
+	Local<Value> val, type;
+	int argcnt = args.Length();
+	if (argcnt > 0) type = args[0];
+	self->assign(isolate, val, type);
+}
+
 void VariantObject::NodeValueOf(const FunctionCallbackInfo<Value>& args) {
 	Isolate *isolate = args.GetIsolate();
 	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
@@ -680,7 +793,7 @@ void VariantObject::NodeValueOf(const FunctionCallbackInfo<Value>& args) {
 		isolate->ThrowException(DispErrorInvalid(isolate));
 		return;
 	}
-	Local<Value> result = Variant2Value(isolate, self->value);
+	Local<Value> result = Variant2Value(isolate, self->value, true);
 	args.GetReturnValue().Set(result);
 }
 
@@ -710,14 +823,26 @@ void VariantObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value
 	}
 	else if (_wcsicmp(id, L"__type") == 0) {
 		std::wstring type;
+		if (self->value.vt & VT_BYREF) type += L"byref:";
 		if (self->value.vt & VT_ARRAY) type = L"array:";
-		if (!self->type.empty()) type += self->type;
+		auto it = vt2str.find(self->value.vt & VT_TYPEMASK);
+		if (it != vt2str.end()) type += it->second;
+		else type += std::to_wstring(self->value.vt & VT_TYPEMASK);
 		args.GetReturnValue().Set(String::NewFromTwoByte(isolate, (uint16_t*)type.c_str()));
 	}
 	else if (_wcsicmp(id, L"__proto__") == 0) {
 		Local<FunctionTemplate> clazz = clazz_template.Get(isolate);
 		if (clazz.IsEmpty()) args.GetReturnValue().SetNull();
 		else args.GetReturnValue().Set(clazz_template.Get(isolate)->GetFunction());
+	}
+	else if (_wcsicmp(id, L"clear") == 0) {
+		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeClear, args.This())->GetFunction());
+	}
+	else if (_wcsicmp(id, L"assign") == 0) {
+		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeAssign, args.This())->GetFunction());
+	}
+	else if (_wcsicmp(id, L"cast") == 0) {
+		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeCast, args.This())->GetFunction());
 	}
 	else if (_wcsicmp(id, L"valueOf") == 0) {
 		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeValueOf, args.This())->GetFunction());
@@ -752,7 +877,7 @@ void VariantObject::NodeGetByIndex(uint32_t index, const PropertyCallbackInfo<Va
 	args.GetReturnValue().Set(result);
 }
 
-void VariantObject::NodeSet(Local<String> name, Local<Value> value, const PropertyCallbackInfo<Value>& args) {
+void VariantObject::NodeSet(Local<String> name, Local<Value> val, const PropertyCallbackInfo<Value>& args) {
 	Isolate *isolate = args.GetIsolate();
 	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
 	if (!self) {

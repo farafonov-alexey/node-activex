@@ -37,24 +37,37 @@ var com_obj = new ActiveXObject({
 	- **uint32** - VT_UI4
 	- **int64**, **long** - VT_I8
 	- **uint64**, **ulong** - VT_UI8
+	- **currency** - VT_CY
 	- **float** - VT_R4
 	- **double** - VT_R8
 	- **string** - VT_BSTR
 	- **date** - VT_DATE
+	- **decimal** - VT_DECIMAL
 	- **variant** - VT_VARIANT
 	- **null** - VT_NULL
 	- **empty** - VT_EMPTY
+	- **byref** - VT_BYREF or use prefix **'p'** to indicate reference to the current type
+
 ``` js 
 var winax = require('winax');
 var Variant = winax.Variant;
 
 // create variant instance 
 var v_short = new Variant(17, 'short');
+var v_short_byref = new Variant(17, 'pshort');
+var v_int_byref = new Variant(17, 'byref');
+var v_byref = new Variant(v_short, 'byref');
 
 // create variant arrays
 var v_array_of_variant = new Variant([1,'2',3]);
 var v_array_of_short = new Variant([1,'2',3], 'short');
 var v_array_of_string = new Variant([1,'2',3], 'string');	
+
+// change variant content
+var v_test = new Variant();
+v_test.assign(17);
+v_test.cast('string');
+v_test.clear();
 
 // also may be used cast function
 var v_short_from_cast = winax.cast(17, 'short');
@@ -151,9 +164,10 @@ node-gyp build
 
 For Electron users, need rebuild with a different V8 version:
 ```
-npm rebuild winax --runtime=electron --target=1.4.3 --disturl=https://atom.io/download/atom-shell --build-from-source
+npm rebuild winax --runtime=electron --target=2.0.2 --disturl=https://atom.io/download/atom-shell --build-from-source
 ```
-See also Electron Documentation: [Using Native Node Modules](https://electron.atom.io/docs/tutorial/using-native-node-modules/)
+Change --target value to your electron version.
+See also Electron Documentation: [Using Native Node Modules](https://electron.atom.io/docs/tutorial/using-native-node-modules/).
 
 # Tests
 

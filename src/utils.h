@@ -64,6 +64,10 @@ public:
 		return VariantCopy(dst, this);
 	}
 
+	inline HRESULT ChangeType(VARTYPE vtNew, const VARIANT* pSrc = NULL) {
+		return VariantChangeType(this, pSrc ? pSrc : this, 0, vtNew);
+	}
+
 	inline ULONG ArrayLength() {
 		if ((vt & VT_ARRAY) == 0) return 0;
 		SAFEARRAY *varr = (vt & VT_BYREF) != 0 ? *pparray : parray;
@@ -96,7 +100,6 @@ public:
 		return SafeArrayRedim(parray, &bnds);
 	}
 };
-
 
 class CComBSTR {
 public:
@@ -205,7 +208,7 @@ inline HRESULT DispFind(IDispatch *disp, LPOLESTR name, DISPID *dispid) {
 inline HRESULT DispInvoke(IDispatch *disp, DISPID dispid, UINT argcnt = 0, VARIANT *args = 0, VARIANT *ret = 0, WORD  flags = DISPATCH_METHOD) {
 	DISPPARAMS params = { args, 0, argcnt, 0 };
 	DISPID dispidNamed = DISPID_PROPERTYPUT;
-	if (flags == DISPATCH_PROPERTYPUT) { // It`s is a magic
+	if (flags == DISPATCH_PROPERTYPUT) { // It`s a magic
 		params.cNamedArgs = 1;
 		params.rgdispidNamedArgs = &dispidNamed;
 	}
@@ -241,13 +244,19 @@ inline INTTYPE Variant2Int(const VARIANT &v, const INTTYPE def) {
     case VT_UI4:
     case VT_UINT:
         return (INTTYPE)(by_ref ? *v.pulVal : v.ulVal);
-    case VT_R4:
+	case VT_CY:
+		return (INTTYPE)((by_ref ? v.pcyVal : &v.cyVal)->int64 / 10000);
+	case VT_R4:
         return (INTTYPE)(by_ref ? *v.pfltVal : v.fltVal);
     case VT_R8:
         return (INTTYPE)(by_ref ? *v.pdblVal : v.dblVal);
     case VT_DATE:
         return (INTTYPE)(by_ref ? *v.pdate : v.date);
-    case VT_BOOL:
+	case VT_DECIMAL: {
+		LONG64 int64val;
+		return SUCCEEDED(VarI8FromDec(by_ref ? v.pdecVal : &v.decVal, &int64val)) ? (INTTYPE)int64val : def; 
+	}
+	case VT_BOOL:
         return (v.boolVal == VARIANT_TRUE) ? 1 : 0;
 	case VT_VARIANT:
 		if (v.pvarVal) return Variant2Int<INTTYPE>(*v.pvarVal, def);

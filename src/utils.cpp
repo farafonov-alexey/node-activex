@@ -92,12 +92,19 @@ Local<Value> Variant2Value(Isolate *isolate, const VARIANT &v, bool allow_disp) 
 	case VT_UI4:
 	case VT_UINT:
 		return Uint32::New(isolate, by_ref ? *v.pulVal : v.ulVal);
+	case VT_CY:
+		return Number::New(isolate, (double)(by_ref ? v.pcyVal : &v.cyVal)->int64 / 10000.);
 	case VT_R4:
 		return Number::New(isolate, by_ref ? *v.pfltVal : v.fltVal);
 	case VT_R8:
 		return Number::New(isolate, by_ref ? *v.pdblVal : v.dblVal);
 	case VT_DATE:
 		return Date::New(isolate, by_ref ? *v.pdate : v.date);
+	case VT_DECIMAL: {
+		DOUBLE dblval;
+		if FAILED(VarR8FromDec(by_ref ? v.pdecVal : &v.decVal, &dblval)) return Undefined(isolate);
+		return Number::New(isolate, dblval);		
+	}
 	case VT_BOOL:
 		return Boolean::New(isolate, (by_ref ? *v.pboolVal : v.boolVal) == VARIANT_TRUE);
 	case VT_DISPATCH: {
@@ -114,7 +121,7 @@ Local<Value> Variant2Value(Isolate *isolate, const VARIANT &v, bool allow_disp) 
 	}
 	case VT_UNKNOWN: {
 		CComPtr<IDispatch> disp;
-		if (allow_disp && UnknownDispGet(((v.vt & VT_BYREF) != 0) ? *v.ppunkVal : v.punkVal, &disp)) {
+		if (allow_disp && UnknownDispGet(by_ref ? *v.ppunkVal : v.punkVal, &disp)) {
 			return DispObject::NodeCreate(isolate, disp, L"Unknown", option_auto);
 		}
 		return String::NewFromUtf8(isolate, "[Unknown]");
@@ -153,6 +160,9 @@ Local<Value> Variant2String(Isolate *isolate, const VARIANT &v) {
 	case VT_UINT:
 		sprintf_s(buf, "%u", (unsigned int)(by_ref ? *v.pulVal : v.ulVal));
 		break;
+	case VT_CY:
+		sprintf_s(buf, "%03f", (double)(by_ref ? v.pcyVal : &v.cyVal)->int64 / 10000.);
+		break;
 	case VT_R4:
 		sprintf_s(buf, "%f", (double)(by_ref ? *v.pfltVal : v.fltVal));
 		break;
@@ -161,6 +171,12 @@ Local<Value> Variant2String(Isolate *isolate, const VARIANT &v) {
 		break;
 	case VT_DATE:
 		return Date::New(isolate, by_ref ? *v.pdate : v.date);
+	case VT_DECIMAL: {
+		DOUBLE dblval;
+		if FAILED(VarR8FromDec(by_ref ? v.pdecVal : &v.decVal, &dblval)) return Undefined(isolate); 
+		sprintf_s(buf, "%f", (double)dblval);
+		break;		
+	}
 	case VT_BOOL:
 		strcpy(buf, ((by_ref ? *v.pboolVal : v.boolVal) == VARIANT_TRUE) ? "true" : "false");
 	case VT_DISPATCH:
