@@ -11,16 +11,19 @@ const GUID CLSID_DispObjectImpl = { 0x9dce8520, 0x2efe, 0x48c0,{ 0xa0, 0xdc, 0x9
 
 //-------------------------------------------------------------------------------------------------------
 
-Local<String> GetWin32ErroroMessage(Isolate *isolate, HRESULT hrcode, LPCOLESTR msg, LPCOLESTR msg2, LPCOLESTR desc) {
-	uint16_t buf[1024], *bufptr = buf;
-	size_t len, buflen = (sizeof(buf) / sizeof(uint16_t)) - 1;
+#define ERROR_MESSAGE_WIDE_MAXSIZE 1024
+#define ERROR_MESSAGE_UTF8_MAXSIZE 2048
+
+uint16_t *GetWin32ErroroMessage(uint16_t *buf, size_t buflen, Isolate *isolate, HRESULT hrcode, LPCOLESTR msg, LPCOLESTR msg2, LPCOLESTR desc) {
+	uint16_t *bufptr = buf;
+	size_t len;
 	if (msg) {
 		len = wcslen(msg);
-		if (len > buflen) len = buflen;
+		if (len >= buflen) len = buflen - 1;
 		if (len > 0) memcpy(bufptr, msg, len * sizeof(uint16_t));
 		buflen -= len;
 		bufptr += len;
-		if (buflen > 1) {
+		if (buflen > 2) {
 			bufptr[0] = ':';
 			bufptr[1] = ' ';
 			buflen -= 2;
@@ -29,31 +32,45 @@ Local<String> GetWin32ErroroMessage(Isolate *isolate, HRESULT hrcode, LPCOLESTR 
 	}
 	if (msg2) {
 		len = wcslen(msg2);
-		if (len > buflen) len = buflen;
+		if (len >= buflen) len = buflen - 1;
 		if (len > 0) memcpy(bufptr, msg2, len * sizeof(uint16_t));
 		buflen -= len;
 		bufptr += len;
-		if (buflen > 0) {
+		if (buflen > 1) {
 			bufptr[0] = ' ';
 			buflen -= 1;
 			bufptr += 1;
 		}
 	}
-	if (buflen > 0) {
+	if (buflen > 1) {
 		len = desc ? wcslen(desc) : 0;
 		if (len > 0) {
 			if (len >= buflen) len = buflen - 1;
 			memcpy(bufptr, desc, len * sizeof(OLECHAR));
 		}
 		else {
-			len = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, 0, hrcode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPOLESTR)bufptr, (DWORD)buflen, 0);
-			if (len == 0) len = swprintf_s((LPOLESTR)bufptr, buflen, L"Error 0x%08X", hrcode);
+			len = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, 0, hrcode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPOLESTR)bufptr, (DWORD)buflen - 1, 0);
+			if (len == 0) len = swprintf_s((LPOLESTR)bufptr, buflen - 1, L"Error 0x%08X", hrcode);
 		}
 		buflen -= len;
 		bufptr += len;
 	}
-	bufptr[0] = 0;
-	return String::NewFromTwoByte(isolate, buf);
+	if (buflen > 0) bufptr[0] = 0;
+	return buf;
+}
+
+char *GetWin32ErroroMessage(char *buf, size_t buflen, Isolate *isolate, HRESULT hrcode, LPCOLESTR msg, LPCOLESTR msg2, LPCOLESTR desc) {
+	uint16_t buf_wide[ERROR_MESSAGE_WIDE_MAXSIZE];
+	GetWin32ErroroMessage(buf_wide, ERROR_MESSAGE_WIDE_MAXSIZE, isolate, hrcode, msg, msg2, desc);
+	int rcode = WideCharToMultiByte(CP_UTF8, 0, (WCHAR*)buf_wide, -1, buf, buflen, NULL, NULL);
+	if (rcode < 0) rcode = 0;
+	buf[rcode] = 0;
+	return buf;
+}
+
+Local<String> GetWin32ErroroMessage(Isolate *isolate, HRESULT hrcode, LPCOLESTR msg, LPCOLESTR msg2, LPCOLESTR desc) {
+	uint16_t buf_wide[ERROR_MESSAGE_WIDE_MAXSIZE];
+	return String::NewFromTwoByte(isolate, GetWin32ErroroMessage(buf_wide, ERROR_MESSAGE_WIDE_MAXSIZE, isolate, hrcode, msg, msg2, desc));
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -99,7 +116,7 @@ Local<Value> Variant2Value(Isolate *isolate, const VARIANT &v, bool allow_disp) 
 	case VT_R8:
 		return Number::New(isolate, by_ref ? *v.pdblVal : v.dblVal);
 	case VT_DATE:
-		return Date::New(isolate, by_ref ? *v.pdate : v.date);
+                return Date::New(isolate, FromOleDate(by_ref ? *v.pdate : v.date));
 	case VT_DECIMAL: {
 		DOUBLE dblval;
 		if FAILED(VarR8FromDec(by_ref ? v.pdecVal : &v.decVal, &dblval)) return Undefined(isolate);
@@ -170,7 +187,7 @@ Local<Value> Variant2String(Isolate *isolate, const VARIANT &v) {
 		sprintf_s(buf, "%f", (double)(by_ref ? *v.pdblVal : v.dblVal));
 		break;
 	case VT_DATE:
-		return Date::New(isolate, by_ref ? *v.pdate : v.date);
+		return Date::New(isolate, FromOleDate(by_ref ? *v.pdate : v.date));
 	case VT_DECIMAL: {
 		DOUBLE dblval;
 		if FAILED(VarR8FromDec(by_ref ? v.pdecVal : &v.decVal, &dblval)) return Undefined(isolate); 
@@ -205,25 +222,29 @@ void Value2Variant(Isolate *isolate, Local<Value> &val, VARIANT &var, VARTYPE vt
 		var.vt = VT_NULL;
 	}
 	else if (val->IsInt32()) {
-		var.vt = VT_I4;
-		var.lVal = val->Int32Value();
-	}
+		//var.lVal = val->Int32Value();
+        var.lVal = val->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
+        var.vt = VT_I4;
+    }
 	else if (val->IsUint32()) {
-		var.ulVal = val->Uint32Value();
+		//var.ulVal = val->Uint32Value();
+        var.ulVal = val->Uint32Value(isolate->GetCurrentContext()).FromMaybe(0);
 		var.vt = (var.ulVal <= 0x7FFFFFFF) ? VT_I4 : VT_UI4;
 	}
 	else if (val->IsNumber()) {
-		var.vt = VT_R8;
-		var.dblVal = val->NumberValue();
-	}
+		//var.dblVal = val->NumberValue();
+        var.dblVal = val->NumberValue(isolate->GetCurrentContext()).FromMaybe(0);
+        var.vt = VT_R8;
+    }
 	else if (val->IsDate()) {
-		var.vt = VT_DATE;
-		var.date = val->NumberValue();
-	}
+		//var.date = ToOleDate(val->NumberValue());
+        var.date = ToOleDate(val->NumberValue(isolate->GetCurrentContext()).FromMaybe(0));
+        var.vt = VT_DATE;
+    }
 	else if (val->IsBoolean()) {
-		var.vt = VT_BOOL;
-		var.boolVal = val->BooleanValue() ? VARIANT_TRUE : VARIANT_FALSE;
-	}
+		var.boolVal = val->BooleanValue(isolate->GetCurrentContext()).FromMaybe(false) ? VARIANT_TRUE : VARIANT_FALSE;
+        var.vt = VT_BOOL;
+    }
 	else if (val->IsArray() && (vt != VT_NULL)) {
 		Local<Array> arr = v8::Local<Array>::Cast(val);
 		uint32_t len = arr->Length();
@@ -242,7 +263,7 @@ void Value2Variant(Isolate *isolate, Local<Value> &val, VARIANT &var, VARTYPE vt
 		vt = VT_EMPTY;
 	}
 	else if (val->IsObject()) {
-		Local<Object> obj = val->ToObject();
+		auto obj = Local<Object>::Cast(val);
 		if (!DispObject::GetValueOf(isolate, obj, var) && !VariantObject::GetValueOf(isolate, obj, var)) {
 			var.vt = VT_DISPATCH;
 			var.pdispVal = new DispObjectImpl(obj);
@@ -260,6 +281,14 @@ void Value2Variant(Isolate *isolate, Local<Value> &val, VARIANT &var, VARTYPE vt
 	}
 }
 
+bool Value2Unknown(Isolate *isolate, Local<Value> &val, IUnknown **unk) {
+    if (val.IsEmpty() || !val->IsObject()) return false;
+    auto obj = Local<Object>::Cast(val);
+    CComVariant var;
+    if (!DispObject::GetValueOf(isolate, obj, var) && !VariantObject::GetValueOf(isolate, obj, var)) return false;
+    return VariantUnkGet(&var, unk);
+}
+
 bool UnknownDispGet(IUnknown *unk, IDispatch **disp) {
 	if (!unk) return false;
 	if SUCCEEDED(unk->QueryInterface(__uuidof(IDispatch), (void**)disp)) {
@@ -274,7 +303,21 @@ bool UnknownDispGet(IUnknown *unk, IDispatch **disp) {
 	return false;
 }
 
-bool VariantDispGet(VARIANT *v, IDispatch **disp) {
+bool VariantUnkGet(VARIANT *v, IUnknown **punk) {
+	IUnknown *unk = NULL;
+    if ((v->vt & VT_TYPEMASK) == VT_DISPATCH) {
+		unk = ((v->vt & VT_BYREF) != 0) ? *v->ppdispVal : v->pdispVal;
+    }
+    else if ((v->vt & VT_TYPEMASK) == VT_UNKNOWN) {
+        unk = ((v->vt & VT_BYREF) != 0) ? *v->ppunkVal : v->punkVal;
+    }
+	if (!unk) return false;
+	unk->AddRef();
+	*punk = unk;
+	return true;
+}
+
+bool VariantDispGet(VARIANT *v, IDispatch **pdisp) {
 	/*
 	if ((v->vt & VT_ARRAY) != 0) {
 		*disp = new DispArrayImpl(*v);
@@ -283,12 +326,14 @@ bool VariantDispGet(VARIANT *v, IDispatch **disp) {
 	}
 	*/
 	if ((v->vt & VT_TYPEMASK) == VT_DISPATCH) {
-        *disp = ((v->vt & VT_BYREF) != 0) ? *v->ppdispVal : v->pdispVal;
-        if (*disp) (*disp)->AddRef();
+		IDispatch *disp = ((v->vt & VT_BYREF) != 0) ? *v->ppdispVal : v->pdispVal;
+		if (!disp) return false;
+        disp->AddRef();
+		*pdisp = disp;
         return true;
     }
     if ((v->vt & VT_TYPEMASK) == VT_UNKNOWN) {
-		return UnknownDispGet(((v->vt & VT_BYREF) != 0) ? *v->ppunkVal : v->punkVal, disp);
+		return UnknownDispGet(((v->vt & VT_BYREF) != 0) ? *v->ppunkVal : v->punkVal, pdisp);
     }
     return false;
 }
@@ -495,6 +540,23 @@ HRESULT STDMETHODCALLTYPE DispObjectImpl::Invoke(DISPID dispIdMember, REFIID rii
 		Value2Variant(isolate, ret, *pVarResult, VT_NULL);
 	}
 	return S_OK;
+}
+
+/*
+* Microsoft OLE Date type:
+* https://docs.microsoft.com/en-us/previous-versions/visualstudio/visual-studio-2008/82ab7w69(v=vs.90)
+*/
+
+double FromOleDate(double oleDate) {
+    double posixDate = oleDate - 25569; // days from 1899 dec 30
+    posixDate *= 24 * 60 * 60 * 1000;   // days to milliseconds
+    return posixDate;
+}
+
+double ToOleDate(double posixDate) {
+    double oleDate = posixDate / (24 * 60 * 60 * 1000); // milliseconds to days
+    oleDate += 25569;                                   // days from 1899 dec 30
+    return oleDate;
 }
 
 //-------------------------------------------------------------------------------------------------------

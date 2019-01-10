@@ -13,6 +13,11 @@ Persistent<FunctionTemplate> DispObject::clazz_template;
 Persistent<ObjectTemplate> VariantObject::inst_template;
 Persistent<FunctionTemplate> VariantObject::clazz_template;
 
+#ifdef TEST_ADVISE 
+Persistent<ObjectTemplate> ConnectionPointObject::inst_template;
+Persistent<FunctionTemplate> ConnectionPointObject::clazz_template;
+#endif
+
 //-------------------------------------------------------------------------------------------------------
 // DispObject implemetation
 
@@ -24,7 +29,7 @@ DispObject::DispObject(const DispInfoPtr &ptr, const std::wstring &nm, DISPID id
         options |= option_prepared;
 	}
 	else options |= option_owned;
-	NODE_DEBUG_FMT("DispObject '%S' constructor", name.c_str());
+    NODE_DEBUG_FMT("DispObject '%S' constructor", name.c_str());
 }
 
 DispObject::~DispObject() {
@@ -67,7 +72,7 @@ bool DispObject::get(LPOLESTR tag, LONG index, const PropertyCallbackInfo<Value>
     HRESULT hrcode;
     DISPID propid;
 	bool prop_by_key = false;
-    if (!tag) {
+    if (!tag || !*tag) {
         tag = (LPOLESTR)name.c_str();
         propid = dispid;
     }
@@ -105,15 +110,16 @@ bool DispObject::get(LPOLESTR tag, LONG index, const PropertyCallbackInfo<Value>
 
     // Return as property value
 	if (is_property_simple) {
+		CComException except;
 		CComVariant value;
 		VarArguments vargs;
 		if (prop_by_key) vargs.items.push_back(CComVariant(tag));
 		if (index >= 0) vargs.items.push_back(CComVariant(index));
 		LONG argcnt = (LONG)vargs.items.size();
 		VARIANT *pargs = (argcnt > 0) ? &vargs.items.front() : 0;
-		hrcode = disp->GetProperty(propid, argcnt, pargs, &value);
+		hrcode = disp->GetProperty(propid, argcnt, pargs, &value, &except);
 		if (FAILED(hrcode) && dispid != DISPID_VALUE){
-			isolate->ThrowException(DispError(isolate, hrcode, L"DispPropertyGet", tag));
+			isolate->ThrowException(DispError(isolate, hrcode, L"DispPropertyGet", tag, &except));
 			return false;
 		}
 		CComPtr<IDispatch> ptr;
@@ -146,7 +152,7 @@ bool DispObject::set(LPOLESTR tag, LONG index, const Local<Value> &value, const 
 	// Search dispid
 	HRESULT hrcode;
 	DISPID propid;
-	if (!tag) {
+    if (!tag || !*tag) {
 		tag = (LPOLESTR)name.c_str();
 		propid = dispid;
 	}
@@ -160,14 +166,15 @@ bool DispObject::set(LPOLESTR tag, LONG index, const Local<Value> &value, const 
 	}
 
 	// Set value using dispatch
+	CComException except;
     CComVariant ret;
 	VarArguments vargs(isolate, value);
 	if (index >= 0) vargs.items.push_back(CComVariant(index));
 	LONG argcnt = (LONG)vargs.items.size();
     VARIANT *pargs = (argcnt > 0) ? &vargs.items.front() : 0;
-	hrcode = disp->SetProperty(propid, argcnt, pargs, &ret);
+	hrcode = disp->SetProperty(propid, argcnt, pargs, &ret, &except);
 	if FAILED(hrcode) {
-		isolate->ThrowException(DispError(isolate, hrcode, L"DispPropertyPut", tag));
+		isolate->ThrowException(DispError(isolate, hrcode, L"DispPropertyPut", tag, &except));
         return false;
     }
 
@@ -193,17 +200,25 @@ void DispObject::call(Isolate *isolate, const FunctionCallbackInfo<Value> &args)
         isolate->ThrowException(DispErrorNull(isolate));
         return;
     }
-    
+
+	CComException except;
 	CComVariant ret;
 	VarArguments vargs(isolate, args);
 	LONG argcnt = (LONG)vargs.items.size();
 	VARIANT *pargs = (argcnt > 0) ? &vargs.items.front() : 0;
 	HRESULT hrcode;
 
-	if ((options & option_property) == 0) hrcode = disp->ExecuteMethod(dispid, argcnt, pargs, &ret);
-	else hrcode = disp->GetProperty(dispid, argcnt, pargs, &ret);
+    if (vargs.IsDefault()) {
+        hrcode = valueOf(isolate, ret, true);
+    }
+    else if ((options & option_property) == 0) {
+        hrcode = disp->ExecuteMethod(dispid, argcnt, pargs, &ret, &except);
+    }
+    else {
+        hrcode = disp->GetProperty(dispid, argcnt, pargs, &ret, &except);
+    }
     if FAILED(hrcode) {
-        isolate->ThrowException(DispError(isolate, hrcode, L"DispInvoke", name.c_str()));
+        isolate->ThrowException(DispError(isolate, hrcode, L"DispInvoke", name.c_str(), &except));
         return;
     }
 
@@ -224,7 +239,7 @@ void DispObject::call(Isolate *isolate, const FunctionCallbackInfo<Value> &args)
     args.GetReturnValue().Set(result);
 }
 
-HRESULT DispObject::valueOf(Isolate *isolate, VARIANT &value) {
+HRESULT DispObject::valueOf(Isolate *isolate, VARIANT &value, bool simple) {
 	if (!is_prepared()) prepare();
 	HRESULT hrcode;
 	if (!disp) hrcode = E_UNEXPECTED;
@@ -235,7 +250,7 @@ HRESULT DispObject::valueOf(Isolate *isolate, VARIANT &value) {
 	}
 
 	// property or array element
-	else if (dispid != DISPID_VALUE || index >= 0) {
+	else if (dispid != DISPID_VALUE || index >= 0 || simple) {
 		hrcode = disp->GetProperty(dispid, index, &value);
 	}
 
@@ -283,7 +298,7 @@ HRESULT DispObject::valueOf(Isolate *isolate, const Local<Object> &self, Local<V
 void DispObject::toString(const FunctionCallbackInfo<Value> &args) {
 	Isolate *isolate = args.GetIsolate();
 	CComVariant val;
-	HRESULT hrcode = valueOf(isolate, val);
+	HRESULT hrcode = valueOf(isolate, val, true);
 	if FAILED(hrcode) {
 		isolate->ThrowException(Win32Error(isolate, hrcode, L"DispToString"));
 		return;
@@ -292,6 +307,7 @@ void DispObject::toString(const FunctionCallbackInfo<Value> &args) {
 }
 
 Local<Value> DispObject::getIdentity(Isolate *isolate) {
+    //wchar_t buf[64];
     std::wstring id;
     id.reserve(128);
     id += name;
@@ -301,6 +317,12 @@ Local<Value> DispObject::getIdentity(Isolate *isolate) {
     while (ptr) {
         id.insert(0, L".");
         id.insert(0, ptr->name);
+        /*
+        if (ptr->index >= 0) {
+            swprintf_s(buf, L"[%ld]", index);
+            id += buf;
+        }
+        */
         ptr = ptr->parent.lock();
     }
     return String::NewFromTwoByte(isolate, (uint16_t*)id.c_str());
@@ -340,8 +362,8 @@ void DispObject::NodeInit(const Local<Object> &target) {
 
     Local<ObjectTemplate> &inst = clazz->InstanceTemplate();
     inst->SetInternalFieldCount(1);
-    inst->SetNamedPropertyHandler(NodeGet, NodeSet);
-    inst->SetIndexedPropertyHandler(NodeGetByIndex, NodeSetByIndex);
+    inst->SetHandler(NamedPropertyHandlerConfiguration(NodeGet, NodeSet));
+    inst->SetHandler(IndexedPropertyHandlerConfiguration(NodeGetByIndex, NodeSetByIndex));
     inst->SetCallAsFunctionHandler(NodeCall);
 	inst->SetNativeDataProperty(String::NewFromUtf8(isolate, "__id"), NodeGet);
 	inst->SetNativeDataProperty(String::NewFromUtf8(isolate, "__value"), NodeGet);
@@ -352,6 +374,10 @@ void DispObject::NodeInit(const Local<Object> &target) {
     target->Set(String::NewFromUtf8(isolate, "Object"), clazz->GetFunction());
 	target->Set(String::NewFromUtf8(isolate, "cast"), FunctionTemplate::New(isolate, NodeCast, target)->GetFunction());
 	target->Set(String::NewFromUtf8(isolate, "release"), FunctionTemplate::New(isolate, NodeRelease, target)->GetFunction());
+
+#ifdef TEST_ADVISE 
+    target->Set(String::NewFromUtf8(isolate, "getConnectionPoints"), FunctionTemplate::New(isolate, NodeConnectionPoints, target)->GetFunction());
+#endif
 
     //Context::GetCurrent()->Global()->Set(String::NewFromUtf8("ActiveXObject"), t->GetFunction());
 	NODE_DEBUG_MSG("DispObject initialized");
@@ -379,14 +405,14 @@ void DispObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
     if (argcnt > 1) {
         Local<Value> argopt = args[1];
         if (!argopt.IsEmpty() && argopt->IsObject()) {
-            Local<Object> opt = argopt->ToObject();
-            if (!v8val2bool(opt->Get(String::NewFromUtf8(isolate, "async")), true)) {
+            auto opt = Local<Object>::Cast(argopt);
+            if (!v8val2bool(isolate, opt->Get(String::NewFromUtf8(isolate, "async")), true)) {
                 options &= ~option_async;
             }
-            if (!v8val2bool(opt->Get(String::NewFromUtf8(isolate, "type")), true)) {
+            if (!v8val2bool(isolate, opt->Get(String::NewFromUtf8(isolate, "type")), true)) {
                 options &= ~option_type;
             }
-			if (v8val2bool(opt->Get(String::NewFromUtf8(isolate, "activate")), false)) {
+			if (v8val2bool(isolate, opt->Get(String::NewFromUtf8(isolate, "activate")), false)) {
 				options |= option_activate;
 			}
 		}
@@ -415,8 +441,7 @@ void DispObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
 	if (args[0]->IsString()) {
 
 		// Prepare arguments
-		Local<String> progid = args[0]->ToString();
-		String::Value vname(progid);
+        String::Value vname(args[0]);
 		if (vname.length() <= 0) hrcode = E_INVALIDARG;
 		else {
 			name.assign((LPOLESTR)*vname, vname.length());
@@ -439,7 +464,7 @@ void DispObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
 	// Create dispatch object from javascript object
 	else if (args[0]->IsObject()) {
 		name = L"#";
-		disp = new DispObjectImpl(args[0]->ToObject());
+		disp = new DispObjectImpl(Local<Object>::Cast(args[0]));
 		hrcode = S_OK;
 	}
 
@@ -460,14 +485,13 @@ void DispObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
 	}
 }
 
-void DispObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value>& args) {
+void DispObject::NodeGet(Local<Name> name, const PropertyCallbackInfo<Value>& args) {
     Isolate *isolate = args.GetIsolate();
 	DispObject *self = DispObject::Unwrap<DispObject>(args.This());
 	if (!self) {
 		isolate->ThrowException(DispErrorInvalid(isolate));
 		return;
 	}
-	
 	String::Value vname(name);
 	LPOLESTR id = (vname.length() > 0) ? (LPOLESTR)*vname : L"";
     NODE_DEBUG_FMT2("DispObject '%S.%S' get", self->name.c_str(), id);
@@ -488,13 +512,13 @@ void DispObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value>& 
 		if (clazz.IsEmpty()) args.GetReturnValue().SetNull();
 		else args.GetReturnValue().Set(clazz_template.Get(isolate)->GetFunction());
 	}
-	else if (_wcsicmp(id, L"valueOf") == 0) {
+	else if (_wcsicmp(id, L"valueOf") == 0 || !*id) {
 		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeValueOf, args.This())->GetFunction());
 	}
 	else if (_wcsicmp(id, L"toString") == 0) {
 		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeToString, args.This())->GetFunction());
 	}
-	else {
+    else {
 		self->get(id, -1, args);
 	}
 }
@@ -510,7 +534,7 @@ void DispObject::NodeGetByIndex(uint32_t index, const PropertyCallbackInfo<Value
     self->get(0, index, args);
 }
 
-void DispObject::NodeSet(Local<String> name, Local<Value> value, const PropertyCallbackInfo<Value>& args) {
+void DispObject::NodeSet(Local<Name> name, Local<Value> value, const PropertyCallbackInfo<Value>& args) {
     Isolate *isolate = args.GetIsolate();
 	DispObject *self = DispObject::Unwrap<DispObject>(args.This());
 	if (!self) {
@@ -575,9 +599,9 @@ void DispObject::NodeRelease(const FunctionCallbackInfo<Value>& args) {
 	Isolate *isolate = args.GetIsolate();
     int rcnt = 0, argcnt = args.Length();
     for (int argi = 0; argi < argcnt; argi++) {
-        Local<Value> &obj = args[argi];
+        auto &obj = args[argi];
         if (obj->IsObject()) {
-            Local<Object> disp_obj = obj->ToObject();
+            auto disp_obj = Local<Object>::Cast(obj);
             DispObject *disp = DispObject::Unwrap<DispObject>(disp_obj);
             if (disp && disp->release())
                 rcnt ++;
@@ -591,9 +615,67 @@ void DispObject::NodeCast(const FunctionCallbackInfo<Value>& args) {
 	args.GetReturnValue().Set(inst);
 }
 
+#ifdef TEST_ADVISE 
+void DispObject::NodeConnectionPoints(const FunctionCallbackInfo<Value>& args) {
+    Isolate *isolate = args.GetIsolate();
+    Local<Array> items = Array::New(isolate);
+    CComPtr<IConnectionPointContainer> cp_cont;
+    CComPtr<IEnumConnectionPoints> cp_enum;
+    
+    // prepare connecton points from arguments
+    int argcnt = args.Length();
+    if (argcnt >= 1) {
+        CComPtr<IUnknown> ptr;
+        if (Value2Unknown(isolate, args[0], &ptr)) {
+            if SUCCEEDED(ptr->QueryInterface(&cp_cont)) {
+                cp_cont->EnumConnectionPoints(&cp_enum);
+            }
+        }
+    }
+
+    // enumerate connection points
+    if (cp_enum) {
+        ULONG cnt_fetched;
+        CComPtr<IConnectionPoint> cp_ptr;
+        uint32_t cnt = 0;
+        while (SUCCEEDED(cp_enum->Next(1, &cp_ptr, &cnt_fetched)) && cnt_fetched == 1) {
+            items->Set(cnt++, ConnectionPointObject::NodeCreateInstance(isolate, cp_ptr));
+            cp_ptr.Release();
+        }
+    }
+
+    // return array of connection points
+    args.GetReturnValue().Set(items);
+}
+#endif
+
 //-------------------------------------------------------------------------------------------------------
 
-const static std::map<std::wstring, VARTYPE> str2vt = {
+class vtypes_t {
+public:
+    inline vtypes_t(std::initializer_list<std::pair<std::wstring, VARTYPE>> recs) {
+        for (auto &rec : recs) {
+            str2vt.emplace(rec.first, rec.second);
+            vt2str.emplace(rec.second, rec.first);
+        }
+    }
+    inline bool find(VARTYPE vt, std::wstring &name) {
+        auto it = vt2str.find(vt);
+        if (it == vt2str.end()) return false;
+        name = it->second;
+        return true;
+    }
+    inline VARTYPE find(const std::wstring &name) {
+        auto it = str2vt.find(name);
+        if (it == str2vt.end()) return VT_EMPTY;
+        return it->second;
+    }
+private:
+    std::map<std::wstring, VARTYPE> str2vt;
+    std::map<VARTYPE, std::wstring> vt2str;
+};
+
+static vtypes_t vtypes({
 	{ L"char", VT_I1 },
 	{ L"uchar", VT_UI1 },
 	{ L"byte", VT_UI1 },
@@ -624,22 +706,13 @@ const static std::map<std::wstring, VARTYPE> str2vt = {
 	{ L"variant", VT_VARIANT },
 	{ L"null", VT_NULL },
 	{ L"byref", VT_BYREF }
-};
-
-static std::map<VARTYPE, std::wstring> vt2str_prepare() {
-	std::map<VARTYPE, std::wstring> map;
-	for (auto &p : str2vt) map.emplace(p.second, p.first);
-	return std::move(map);
-}
-
-const static std::map<VARTYPE, std::wstring> vt2str = vt2str_prepare();
+});
 
 bool VariantObject::assign(Isolate *isolate, Local<Value> &val, Local<Value> &type) {
 	VARTYPE vt = VT_EMPTY;
 	if (!type.IsEmpty()) {
 		if (type->IsString()) {
-			Local<String> vtval = type->ToString();
-			String::Value vtstr(vtval);
+			String::Value vtstr(type);
 			const wchar_t *pvtstr = (const wchar_t *)*vtstr;
 			int vtstr_len = vtstr.length();
 			if (vtstr_len > 0 && *pvtstr == 'p') {
@@ -649,12 +722,11 @@ bool VariantObject::assign(Isolate *isolate, Local<Value> &val, Local<Value> &ty
 			}
 			if (vtstr_len > 0) {
 				std::wstring type(pvtstr, vtstr_len);
-				auto it = str2vt.find(type);
-				if (it != str2vt.end()) vt |= it->second;
+                vt |= vtypes.find(type);
 			}
 		}
 		else if (type->IsInt32()) {
-			vt |= type->Int32Value();
+			vt |= type->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 		}
 	}
 
@@ -672,7 +744,7 @@ bool VariantObject::assign(Isolate *isolate, Local<Value> &val, Local<Value> &ty
 	else {
 		VARIANT *refvalue = nullptr;
 		VARTYPE vt_noref = vt & ~VT_BYREF;
-		VariantObject *ref = (!val.IsEmpty() && val->IsObject()) ? GetInstanceOf(isolate, val->ToObject()) : nullptr;
+		VariantObject *ref = (!val.IsEmpty() && val->IsObject()) ? GetInstanceOf(isolate, Local<Object>::Cast(val)) : nullptr;
 		if (ref) {
 			if ((ref->value.vt & VT_BYREF) != 0) value = ref->value;
 			else refvalue = &ref->value;
@@ -718,9 +790,9 @@ void VariantObject::NodeInit(const Local<Object> &target) {
 
 	Local<ObjectTemplate> &inst = clazz->InstanceTemplate();
 	inst->SetInternalFieldCount(1);
-	inst->SetNamedPropertyHandler(NodeGet, NodeSet);
-	inst->SetIndexedPropertyHandler(NodeGetByIndex, NodeSetByIndex);
-	//inst->SetCallAsFunctionHandler(NodeCall);
+    inst->SetHandler(NamedPropertyHandlerConfiguration(NodeGet, NodeSet));
+    inst->SetHandler(IndexedPropertyHandlerConfiguration(NodeGetByIndex, NodeSetByIndex));
+    //inst->SetCallAsFunctionHandler(NodeCall);
 	//inst->SetNativeDataProperty(String::NewFromUtf8(isolate, "__id"), NodeGet);
 	inst->SetNativeDataProperty(String::NewFromUtf8(isolate, "__value"), NodeGet);
 	inst->SetNativeDataProperty(String::NewFromUtf8(isolate, "__type"), NodeGet);
@@ -808,7 +880,7 @@ void VariantObject::NodeToString(const FunctionCallbackInfo<Value>& args) {
 	args.GetReturnValue().Set(result);
 }
 
-void VariantObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value>& args) {
+void VariantObject::NodeGet(Local<Name> name, const PropertyCallbackInfo<Value>& args) {
 	Isolate *isolate = args.GetIsolate();
 	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
 	if (!self) {
@@ -822,11 +894,10 @@ void VariantObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value
 		args.GetReturnValue().Set(result);
 	}
 	else if (_wcsicmp(id, L"__type") == 0) {
-		std::wstring type;
+		std::wstring type, name;
 		if (self->value.vt & VT_BYREF) type += L"byref:";
 		if (self->value.vt & VT_ARRAY) type = L"array:";
-		auto it = vt2str.find(self->value.vt & VT_TYPEMASK);
-		if (it != vt2str.end()) type += it->second;
+        if (vtypes.find(self->value.vt & VT_TYPEMASK, name)) type += name;
 		else type += std::to_wstring(self->value.vt & VT_TYPEMASK);
 		args.GetReturnValue().Set(String::NewFromTwoByte(isolate, (uint16_t*)type.c_str()));
 	}
@@ -844,7 +915,7 @@ void VariantObject::NodeGet(Local<String> name, const PropertyCallbackInfo<Value
 	else if (_wcsicmp(id, L"cast") == 0) {
 		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeCast, args.This())->GetFunction());
 	}
-	else if (_wcsicmp(id, L"valueOf") == 0) {
+	else if (_wcsicmp(id, L"valueOf") == 0 || !*id) {
 		args.GetReturnValue().Set(FunctionTemplate::New(isolate, NodeValueOf, args.This())->GetFunction());
 	}
 	else if (_wcsicmp(id, L"toString") == 0) {
@@ -877,7 +948,7 @@ void VariantObject::NodeGetByIndex(uint32_t index, const PropertyCallbackInfo<Va
 	args.GetReturnValue().Set(result);
 }
 
-void VariantObject::NodeSet(Local<String> name, Local<Value> val, const PropertyCallbackInfo<Value>& args) {
+void VariantObject::NodeSet(Local<Name> name, Local<Value> val, const PropertyCallbackInfo<Value>& args) {
 	Isolate *isolate = args.GetIsolate();
 	VariantObject *self = VariantObject::Unwrap<VariantObject>(args.This());
 	if (!self) {
@@ -897,4 +968,72 @@ void VariantObject::NodeSetByIndex(uint32_t index, Local<Value> value, const Pro
 	isolate->ThrowException(DispError(isolate, E_NOTIMPL));
 }
 
+//-------------------------------------------------------------------------------------------------------
+#ifdef TEST_ADVISE 
+
+Local<Object> ConnectionPointObject::NodeCreateInstance(Isolate *isolate, IConnectionPoint *p) {
+    Local<Object> self;
+    if (!inst_template.IsEmpty()) {
+        self = inst_template.Get(isolate)->NewInstance();
+        (new ConnectionPointObject(p))->Wrap(self);
+    }
+    return self;
+}
+
+void ConnectionPointObject::NodeInit(const Local<Object> &target) {
+    Isolate *isolate = target->GetIsolate();
+
+    // Prepare constructor template
+    Local<FunctionTemplate> clazz = FunctionTemplate::New(isolate, NodeCreate);
+    clazz->SetClassName(String::NewFromUtf8(isolate, "ConnectionPoint"));
+
+    NODE_SET_PROTOTYPE_METHOD(clazz, "advise", NodeAdvise);
+
+    Local<ObjectTemplate> &inst = clazz->InstanceTemplate();
+    inst->SetInternalFieldCount(1);
+
+    inst_template.Reset(isolate, inst);
+    clazz_template.Reset(isolate, clazz);
+    //target->Set(String::NewFromUtf8(isolate, "ConnectionPoint"), clazz->GetFunction());
+    NODE_DEBUG_MSG("ConnectionPointObject initialized");
+}
+
+void ConnectionPointObject::NodeCreate(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    Local<Object> &self = args.This();
+    (new ConnectionPointObject(args))->Wrap(self);
+    args.GetReturnValue().Set(self);
+}
+
+void ConnectionPointObject::NodeAdvise(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    ConnectionPointObject *self = ConnectionPointObject::Unwrap<ConnectionPointObject>(args.This());
+    if (!self || !self->ptr) {
+        isolate->ThrowException(DispErrorInvalid(isolate));
+        return;
+    }
+    CComPtr<IUnknown> unk;
+    int argcnt = args.Length();
+    if (argcnt > 0) {
+        Local<Value> val = args[0];
+        if (!Value2Unknown(isolate, val, &unk)) {
+            if (!val.IsEmpty() && val->IsObject()) {
+                unk.Attach(new DispObjectImpl(val->ToObject()));
+            }
+        }
+    }
+    if (!unk) {
+        isolate->ThrowException(InvalidArgumentsError(isolate));
+        return;
+    }
+    DWORD dwCookie;
+    HRESULT hrcode = self->ptr->Advise(unk, &dwCookie);
+    if FAILED(hrcode) {
+        isolate->ThrowException(DispError(isolate, hrcode));
+        return;
+    }
+    args.GetReturnValue().Set(v8::Integer::New(isolate, (uint32_t)dwCookie));
+}
+
+#endif
 //-------------------------------------------------------------------------------------------------------

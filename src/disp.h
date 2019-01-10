@@ -113,25 +113,25 @@ public:
 		return DispFind(ptr, name, dispid);
 	}
 
-	HRESULT GetProperty(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value) {
-		HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_PROPERTYGET);
+	HRESULT GetProperty(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value, EXCEPINFO *except = 0) {
+		HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_PROPERTYGET, except);
 		return hrcode;
 	}
 
-	HRESULT GetProperty(DISPID dispid, LONG index, VARIANT *value) {
+	HRESULT GetProperty(DISPID dispid, LONG index, VARIANT *value, EXCEPINFO *except = 0) {
 		CComVariant arg(index);
 		LONG argcnt = (index >= 0) ? 1 : 0;
-		return DispInvoke(ptr, dispid, argcnt, &arg, value, DISPATCH_PROPERTYGET);
+		return DispInvoke(ptr, dispid, argcnt, &arg, value, DISPATCH_PROPERTYGET, except);
 	}
 
-	HRESULT SetProperty(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value) {
-		HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_PROPERTYPUT);
+	HRESULT SetProperty(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value, EXCEPINFO *except = 0) {
+		HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_PROPERTYPUT, except);
 		if FAILED(hrcode) value->vt = VT_EMPTY;
 		return hrcode;
 	}
 
-    HRESULT ExecuteMethod(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value) {
-        HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_METHOD);
+    HRESULT ExecuteMethod(DISPID dispid, LONG argcnt, VARIANT *args, VARIANT *value, EXCEPINFO *except = 0) {
+        HRESULT hrcode = DispInvoke(ptr, dispid, argcnt, args, value, DISPATCH_METHOD, except);
         return hrcode;
     }
 };
@@ -155,7 +155,7 @@ public:
 		Local<FunctionTemplate> clazz = clazz_template.Get(isolate);
 		if (clazz.IsEmpty() || !clazz->HasInstance(obj)) return false;
 		DispObject *self = Unwrap<DispObject>(obj);
-		return self && SUCCEEDED(self->valueOf(isolate, value));
+		return self && SUCCEEDED(self->valueOf(isolate, value, false));
 	}
 	static Local<Object> NodeCreate(Isolate *isolate, IDispatch *disp, const std::wstring &name, int opt) {
 		Local<Object> parent;
@@ -171,11 +171,15 @@ private:
 	static void NodeToString(const FunctionCallbackInfo<Value> &args);
 	static void NodeRelease(const FunctionCallbackInfo<Value> &args);
 	static void NodeCast(const FunctionCallbackInfo<Value> &args);
-	static void NodeGet(Local<String> name, const PropertyCallbackInfo<Value> &args);
-	static void NodeSet(Local<String> name, Local<Value> value, const PropertyCallbackInfo<Value> &args);
+    static void NodeGet(Local<Name> name, const PropertyCallbackInfo<Value> &args);
+	static void NodeSet(Local<Name> name, Local<Value> value, const PropertyCallbackInfo<Value> &args);
 	static void NodeGetByIndex(uint32_t index, const PropertyCallbackInfo<Value> &args);
 	static void NodeSetByIndex(uint32_t index, Local<Value> value, const PropertyCallbackInfo<Value> &args);
 	static void NodeCall(const FunctionCallbackInfo<Value> &args);
+
+#ifdef TEST_ADVISE 
+    static void NodeConnectionPoints(const FunctionCallbackInfo<Value> &args);
+#endif
 
 protected:
 	bool release();
@@ -183,7 +187,7 @@ protected:
 	bool set(LPOLESTR tag, LONG index, const Local<Value> &value, const PropertyCallbackInfo<Value> &args);
 	void call(Isolate *isolate, const FunctionCallbackInfo<Value> &args);
 
-	HRESULT valueOf(Isolate *isolate, VARIANT &value);
+	HRESULT valueOf(Isolate *isolate, VARIANT &value, bool simple);
 	HRESULT valueOf(Isolate *isolate, const Local<Object> &self, Local<Value> &value);
 	void toString(const FunctionCallbackInfo<Value> &args);
     Local<Value> getIdentity(Isolate *isolate);
@@ -238,8 +242,8 @@ public:
 	static void NodeCast(const FunctionCallbackInfo<Value> &args);
 	static void NodeValueOf(const FunctionCallbackInfo<Value> &args);
 	static void NodeToString(const FunctionCallbackInfo<Value> &args);
-	static void NodeGet(Local<String> name, const PropertyCallbackInfo<Value> &args);
-	static void NodeSet(Local<String> name, Local<Value> value, const PropertyCallbackInfo<Value> &args);
+	static void NodeGet(Local<Name> name, const PropertyCallbackInfo<Value> &args);
+	static void NodeSet(Local<Name> name, Local<Value> value, const PropertyCallbackInfo<Value> &args);
 	static void NodeGetByIndex(uint32_t index, const PropertyCallbackInfo<Value> &args);
 	static void NodeSetByIndex(uint32_t index, Local<Value> value, const PropertyCallbackInfo<Value> &args);
 
@@ -248,3 +252,21 @@ private:
 	bool assign(Isolate *isolate, Local<Value> &val, Local<Value> &type);
 };
 
+#ifdef TEST_ADVISE 
+
+class ConnectionPointObject : public ObjectWrap
+{
+public:
+    ConnectionPointObject(IConnectionPoint *p): ptr(p) {}
+    ConnectionPointObject(const FunctionCallbackInfo<Value> &args) {}
+    static Persistent<ObjectTemplate> inst_template;
+    static Persistent<FunctionTemplate> clazz_template;
+    static Local<Object> NodeCreateInstance(Isolate *isolate, IConnectionPoint *p);
+    static void NodeInit(const Local<Object> &target);
+    static void NodeCreate(const FunctionCallbackInfo<Value> &args);
+    static void NodeAdvise(const FunctionCallbackInfo<Value> &args);
+private:
+    CComPtr<IConnectionPoint> ptr;
+};
+
+#endif
